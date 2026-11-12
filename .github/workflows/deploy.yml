@@ -1,0 +1,47 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to deploy (e.g. 1.0.1, or an older one to roll back)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false # never cancel a deploy halfway
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production # waits for a reviewer before the steps start
+    steps:
+      # There is no VM in this lab, so the target is the runner itself: the job pulls the
+      # requested tag from GHCR, starts it and checks what it answers. The container lives
+      # only as long as the job. With a real server this step is the SSH/compose one.
+      - name: Deploy the requested tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          docker pull "$IMAGE:$TAG"
+          docker rm -f lab11-prod 2>/dev/null || true
+          docker run -d --name lab11-prod -p 8012:8000 "$IMAGE:$TAG"
+      - name: Verify the running version
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            if curl -fsS localhost:8012/healthz > /dev/null; then break; fi
+            sleep 1
+          done
+          answer=$(curl -fsS localhost:8012/version)
+          echo "version endpoint: $answer"
+          echo "deployed \`$TAG\`: \`$answer\`" >> "$GITHUB_STEP_SUMMARY"
+          test "$answer" = "{\"version\":\"$TAG\"}"
+          docker ps --filter name=lab11-prod
